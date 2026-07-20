@@ -749,7 +749,7 @@ async def ai_chat(body: ChatRequest, user_id: str = Depends(get_current_user)):
     messages = [m.model_dump() for m in body.messages]
 
     # Get per-user API keys from DB
-    user_tog_key, user_or_key = get_user_api_keys(user_id)
+    user_tog_key, user_or_key, user_hf_key = get_user_api_keys(user_id)
 
     # Create clients with user's keys
     tog_client = AsyncOpenAI(
@@ -763,6 +763,10 @@ async def ai_chat(body: ChatRequest, user_id: str = Depends(get_current_user)):
             "HTTP-Referer": "https://podcastone.workshop.build",
             "X-Title": "Podcast One Script Wizard",
         },
+    )
+    hf_client = AsyncOpenAI(
+        api_key=user_hf_key or "placeholder",
+        base_url="https://router.huggingface.co/v1",
     )
 
     # System prompt for the chat assistant
@@ -779,7 +783,24 @@ async def ai_chat(body: ChatRequest, user_id: str = Depends(get_current_user)):
     full_messages = [system_msg] + messages
 
     async def event_stream():
-        if provider == "together":
+        if provider == "huggingface":
+            model_name = HUGGINGFACE_CHAT_MODEL
+            if not user_hf_key:
+                yield f"data: {json.dumps({'error': 'Hugging Face API key not configured. Add it in Settings.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            yield f"data: {json.dumps({'provider': 'Hugging Face', 'model': model_name})}\n\n"
+            try:
+                async for token in stream_chat(hf_client, model_name, full_messages):
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                yield f"data: {json.dumps({'error': f'Hugging Face error: {str(e)}'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+        elif provider == "together":
             model_name = TOGETHER_MODELS.get("draft", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
             if not user_tog_key:
                 yield f"data: {json.dumps({'error': 'Together.AI API key not configured. Add it in Settings.'})}\n\n"
@@ -833,7 +854,18 @@ async def ai_chat(body: ChatRequest, user_id: str = Depends(get_current_user)):
                 return
 
         else:
-            # "auto" — try Together.AI first, fall back to OpenRouter
+            # "auto" — try Hugging Face first, then Together.AI, then OpenRouter
+            if user_hf_key:
+                model_name = HUGGINGFACE_CHAT_MODEL
+                yield f"data: {json.dumps({'provider': 'Hugging Face', 'model': model_name})}\n\n"
+                try:
+                    async for token in stream_chat(hf_client, model_name, full_messages):
+                        yield f"data: {json.dumps({'token': token})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                except Exception:
+                    pass  # fall through to Together
+
             if user_tog_key:
                 model_name = TOGETHER_MODELS.get("draft", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
                 yield f"data: {json.dumps({'provider': 'Together.AI', 'model': model_name})}\n\n"

@@ -41,8 +41,10 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   // API keys
   const [togetherKey, setTogetherKey] = useState("")
   const [openrouterKey, setOpenrouterKey] = useState("")
+  const [huggingfaceKey, setHuggingfaceKey] = useState("")
   const [showTogether, setShowTogether] = useState(false)
   const [showOpenrouter, setShowOpenrouter] = useState(false)
+  const [showHuggingface, setShowHuggingface] = useState(false)
   const [keysSaving, setKeysSaving] = useState(false)
   const [keysLoaded, setKeysLoaded] = useState(false)
   const [keysSuccess, setKeysSuccess] = useState("")
@@ -57,6 +59,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         .then((data) => {
           setTogetherKey(data.together_key || "")
           setOpenrouterKey(data.openrouter_key || "")
+          setHuggingfaceKey(data.huggingface_key || "")
           setKeysLoaded(true)
         })
         .catch(() => {})
@@ -97,6 +100,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         body: JSON.stringify({
           together_key: togetherKey,
           openrouter_key: openrouterKey,
+          huggingface_key: huggingfaceKey,
         }),
       })
       if (!res.ok) throw new Error("Failed to save keys")
@@ -225,6 +229,28 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
                   {showOpenrouter ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="huggingface-key" className="text-xs text-muted-foreground">Hugging Face API Key</Label>
+              <div className="relative">
+                <Cpu className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="huggingface-key"
+                  type={showHuggingface ? "text" : "password"}
+                  value={huggingfaceKey}
+                  onChange={(e) => setHuggingfaceKey(e.target.value)}
+                  placeholder="hf_..."
+                  className="pl-9 pr-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowHuggingface(!showHuggingface)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  {showHuggingface ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
             </div>

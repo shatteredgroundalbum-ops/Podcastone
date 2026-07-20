@@ -18,6 +18,8 @@ interface AIProviderSelectorProps {
 }
 
 const defaultModels = [
+  { provider: "huggingface", model: "Qwen/Qwen2.5-Coder-7B-Instruct", label: "Qwen 2.5 Coder 7B" },
+  { provider: "huggingface", model: "THUDM/GLM-5.2-UD", label: "GLM-5.2-UD" },
   { provider: "together", model: "meta-llama/Llama-3.3-70B-Instruct-Turbo", label: "Llama 3.3 70B" },
   { provider: "together", model: "mistralai/Mixtral-8x22B-Instruct-v0.1", label: "Mixtral 8x22B" },
   { provider: "openrouter", model: "meta-llama/llama-3.3-70b-instruct:free", label: "Llama 3.3 70B (Free)" },
@@ -29,6 +31,7 @@ export function AIProviderSelector({ provider, onProviderChange, availableModels
 
   const providerLabel = (p: string) => {
     if (p === "auto") return "Auto"
+    if (p === "huggingface") return "Hugging Face"
     if (p === "together") return "Together.AI"
     if (p === "openrouter") return "OpenRouter"
     return p.startsWith("model:") ? p.slice(6).split("/").pop() || p : p
@@ -54,6 +57,7 @@ export function AIProviderSelector({ provider, onProviderChange, availableModels
           
           <SelectGroup>
             <SelectLabel className="text-xs text-muted-foreground">Providers</SelectLabel>
+            <SelectItem value="huggingface">Hugging Face</SelectItem>
             <SelectItem value="together">Together.AI</SelectItem>
             <SelectItem value="openrouter">OpenRouter</SelectItem>
           </SelectGroup>
