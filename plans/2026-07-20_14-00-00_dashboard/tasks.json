@@ -1,0 +1,32 @@
+[
+  {
+    "content": "Add Hugging Face provider to backend: client, models, chat routing",
+    "id": "hf-1",
+    "status": "in_progress"
+  },
+  {
+    "content": "Add Hugging Face API key to Settings dialog + DB storage",
+    "id": "hf-2",
+    "status": "pending"
+  },
+  {
+    "content": "Update AIProviderSelector with Hugging Face and GLM-5.2 model option",
+    "id": "hf-3",
+    "status": "pending"
+  },
+  {
+    "content": "Update Auto mode to try Hugging Face (GLM-5.2) first, then Together, then OpenRouter",
+    "id": "hf-4",
+    "status": "pending"
+  },
+  {
+    "content": "Add /api/keys/available-providers endpoint to list available models per provider",
+    "id": "hf-5",
+    "status": "pending"
+  },
+  {
+    "content": "Build and verify everything compiles",
+    "id": "hf-6",
+    "status": "pending"
+  }
+]

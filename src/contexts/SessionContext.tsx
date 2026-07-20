@@ -89,8 +89,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         }),
       })
       if (res.ok) {
+        // Only update the sessions list — do NOT overwrite local session state
+        // (we already applied it optimistically; overwriting causes stage resets)
         const saved = await res.json()
-        setSession(saved)
         setSessions(prev => prev.map(s => s.id === saved.id ? saved : s))
       }
     } finally {
@@ -127,6 +128,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const nextStep = useCallback(async () => {
     if (!session) return
+    // Cancel any pending debounced save to prevent stale stage overwrite
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     let updated: PodcastSession
     if (session.current_stage === 1) {
       if (session.current_section < 1) {
@@ -145,6 +148,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const prevStep = useCallback(async () => {
     if (!session) return
+    // Cancel any pending debounced save to prevent stale stage overwrite
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     let updated: PodcastSession
     if (session.current_stage === 1) {
       if (session.current_section > 0) {
@@ -160,6 +165,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const goToStage = useCallback(async (stage: number, section = 0) => {
     if (!session) return
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     const updated = { ...session, current_stage: stage, current_section: section }
     setSession(updated)
     await saveSession(updated)

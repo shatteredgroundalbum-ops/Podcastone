@@ -1,21 +1,24 @@
 import os
 import json
 import uuid
+import sqlite3
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional, AsyncIterator
+from pathlib import Path
 
 import bcrypt
 import jwt
-import psycopg2
-import psycopg2.extras
 from fastapi import APIRouter, FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 
 api = APIRouter()
+
+@api.get("/health")
+async def health():
+    return {"ok": True}
 
 # ── Config ──────────────────────────────────────────────────────────────────
 JWT_SECRET = os.environ.get("JWT_SECRET", "podcast-wizard-secret-key-2024")
@@ -24,7 +27,7 @@ JWT_EXPIRE_DAYS = 30
 
 TOGETHER_API_KEY = os.environ.get("TOGETHER_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-DB_URL = os.environ.get("DB334CA579_DATABASE_URL", "")
+HUGGINGFACE_API_KEY = os.environ.get("HUGGINGFACE_API_KEY", "")
 
 together_client = AsyncOpenAI(
     api_key=TOGETHER_API_KEY or "placeholder",
@@ -39,6 +42,14 @@ openrouter_client = AsyncOpenAI(
         "X-Title": "Podcast One Script Wizard",
     },
 )
+
+huggingface_client = AsyncOpenAI(
+    api_key=HUGGINGFACE_API_KEY or "placeholder",
+    base_url="https://router.huggingface.co/v1",
+)
+
+# Hugging Face — default Auto model (GLM-5.2, free tier)
+HUGGINGFACE_CHAT_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
 
 # Together.AI — paid, highest quality per task
 TOGETHER_MODELS = {
@@ -59,9 +70,114 @@ OPENROUTER_MODELS = {
 }
 
 
-# ── DB helper ────────────────────────────────────────────────────────────────
-def get_conn():
-    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+# ── SQLite DB ────────────────────────────────────────────────────────────────
+DB_PATH = Path(__file__).parent / "podcastone.db"
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+def init_db():
+    conn = get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            name          TEXT NOT NULL,
+            email         TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id              TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            project_name    TEXT NOT NULL,
+            current_stage   INTEGER NOT NULL DEFAULT 1,
+            current_section INTEGER NOT NULL DEFAULT 0,
+            data            TEXT NOT NULL DEFAULT '{}',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS api_keys (
+            user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            provider  TEXT NOT NULL,
+            api_key   TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (user_id, provider)
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+
+# ── API Key management ────────────────────────────────────────────────────────
+class APIKeyRequest(BaseModel):
+    together_key: str = ""
+    openrouter_key: str = ""
+    huggingface_key: str = ""
+
+
+@api.get("/keys")
+async def get_api_keys(user_id: str = Depends(get_current_user)):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        keys = {"together_key": "", "openrouter_key": "", "huggingface_key": ""}
+        cur.execute("SELECT provider, api_key FROM api_keys WHERE user_id=?", (user_id,))
+        for row in cur.fetchall():
+            if row["provider"] == "together":
+                keys["together_key"] = row["api_key"]
+            elif row["provider"] == "openrouter":
+                keys["openrouter_key"] = row["api_key"]
+            elif row["provider"] == "huggingface":
+                keys["huggingface_key"] = row["api_key"]
+        return keys
+    finally:
+        conn.close()
+
+
+@api.put("/keys")
+async def save_api_keys(body: APIKeyRequest, user_id: str = Depends(get_current_user)):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for provider, key in [("together", body.together_key), ("openrouter", body.openrouter_key), ("huggingface", body.huggingface_key)]:
+            cur.execute(
+                "INSERT OR REPLACE INTO api_keys (user_id, provider, api_key) VALUES (?, ?, ?)",
+                (user_id, provider, key),
+            )
+        conn.commit()
+        return {"status": "saved"}
+    finally:
+        conn.close()
+
+
+def get_user_api_keys(user_id: str) -> tuple[str, str, str]:
+    """Get API keys for a user from the DB, falling back to env vars."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT provider, api_key FROM api_keys WHERE user_id=?", (user_id,))
+        together_key = ""
+        openrouter_key = ""
+        huggingface_key = ""
+        for row in cur.fetchall():
+            if row["provider"] == "together":
+                together_key = row["api_key"]
+            elif row["provider"] == "openrouter":
+                openrouter_key = row["api_key"]
+            elif row["provider"] == "huggingface":
+                huggingface_key = row["api_key"]
+        return (
+            together_key or TOGETHER_API_KEY,
+            openrouter_key or OPENROUTER_API_KEY,
+            huggingface_key or HUGGINGFACE_API_KEY,
+        )
+    finally:
+        conn.close()
 
 
 # ── Auth helpers ─────────────────────────────────────────────────────────────
@@ -113,17 +229,17 @@ async def signup(body: SignupRequest):
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE email = %s", (body.email.lower(),))
+        cur.execute("SELECT id FROM users WHERE email = ?", (body.email.lower(),))
         if cur.fetchone():
             raise HTTPException(status_code=409, detail="Email already registered")
         pw_hash = hash_password(body.password)
+        new_id = uuid.uuid4().hex
         cur.execute(
-            "INSERT INTO users (name, email, password_hash) VALUES (%s, %s, %s) RETURNING id, name, email",
-            (body.name, body.email.lower(), pw_hash),
+            "INSERT INTO users (id, name, email, password_hash) VALUES (?, ?, ?, ?)",
+            (new_id, body.name, body.email.lower(), pw_hash),
         )
-        user = dict(cur.fetchone())
         conn.commit()
-        return {"token": make_token(str(user["id"])), "user": {"id": str(user["id"]), "name": user["name"], "email": user["email"]}}
+        return {"token": make_token(new_id), "user": {"id": new_id, "name": body.name, "email": body.email.lower()}}
     finally:
         conn.close()
 
@@ -133,11 +249,11 @@ async def login(body: LoginRequest):
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, email, password_hash FROM users WHERE email = %s", (body.email.lower(),))
+        cur.execute("SELECT id, name, email, password_hash FROM users WHERE email = ?", (body.email.lower(),))
         row = cur.fetchone()
         if not row or not verify_password(body.password, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid email or password")
-        return {"token": make_token(str(row["id"])), "user": {"id": str(row["id"]), "name": row["name"], "email": row["email"]}}
+        return {"token": make_token(row["id"]), "user": {"id": row["id"], "name": row["name"], "email": row["email"]}}
     finally:
         conn.close()
 
@@ -147,11 +263,11 @@ async def get_me(user_id: str = Depends(get_current_user)):
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
+        cur.execute("SELECT id, name, email FROM users WHERE id = ?", (user_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="User not found")
-        return {"id": str(row["id"]), "name": row["name"], "email": row["email"]}
+        return {"id": row["id"], "name": row["name"], "email": row["email"]}
     finally:
         conn.close()
 
@@ -168,18 +284,17 @@ async def update_account(body: UpdateAccountRequest, user_id: str = Depends(get_
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,))
+        cur.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,))
         row = cur.fetchone()
         if not row or not verify_password(body.current_password, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Current password incorrect")
         new_hash = hash_password(body.new_password) if body.new_password else row["password_hash"]
         cur.execute(
-            "UPDATE users SET name=%s, email=%s, password_hash=%s WHERE id=%s RETURNING id, name, email",
+            "UPDATE users SET name=?, email=?, password_hash=? WHERE id=?",
             (body.name, body.email.lower(), new_hash, user_id),
         )
-        updated = dict(cur.fetchone())
         conn.commit()
-        return {"id": str(updated["id"]), "name": updated["name"], "email": updated["email"]}
+        return {"id": user_id, "name": body.name, "email": body.email.lower()}
     finally:
         conn.close()
 
@@ -202,19 +317,19 @@ async def list_sessions(user_id: str = Depends(get_current_user)):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, project_name, current_stage, current_section, data, created_at, updated_at FROM sessions WHERE user_id=%s ORDER BY updated_at DESC",
+            "SELECT id, project_name, current_stage, current_section, data, created_at, updated_at FROM sessions WHERE user_id=? ORDER BY updated_at DESC",
             (user_id,),
         )
         rows = cur.fetchall()
         return [
             {
-                "id": str(r["id"]),
+                "id": r["id"],
                 "project_name": r["project_name"],
                 "current_stage": r["current_stage"],
                 "current_section": r["current_section"],
-                "data": r["data"],
-                "created_at": r["created_at"].isoformat(),
-                "updated_at": r["updated_at"].isoformat(),
+                "data": json.loads(r["data"]) if isinstance(r["data"], str) else r["data"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
             }
             for r in rows
         ]
@@ -227,20 +342,21 @@ async def create_session(body: SessionCreate, user_id: str = Depends(get_current
     conn = get_conn()
     try:
         cur = conn.cursor()
+        new_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
         cur.execute(
-            "INSERT INTO sessions (user_id, project_name) VALUES (%s, %s) RETURNING id, project_name, current_stage, current_section, data, created_at, updated_at",
-            (user_id, body.project_name),
+            "INSERT INTO sessions (id, user_id, project_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (new_id, user_id, body.project_name, now, now),
         )
-        r = cur.fetchone()
         conn.commit()
         return {
-            "id": str(r["id"]),
-            "project_name": r["project_name"],
-            "current_stage": r["current_stage"],
-            "current_section": r["current_section"],
-            "data": r["data"],
-            "created_at": r["created_at"].isoformat(),
-            "updated_at": r["updated_at"].isoformat(),
+            "id": new_id,
+            "project_name": body.project_name,
+            "current_stage": 1,
+            "current_section": 0,
+            "data": {},
+            "created_at": now,
+            "updated_at": now,
         }
     finally:
         conn.close()
@@ -251,18 +367,18 @@ async def get_session(session_id: str, user_id: str = Depends(get_current_user))
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM sessions WHERE id=%s AND user_id=%s", (session_id, user_id))
+        cur.execute("SELECT * FROM sessions WHERE id=? AND user_id=?", (session_id, user_id))
         r = cur.fetchone()
         if not r:
             raise HTTPException(status_code=404, detail="Session not found")
         return {
-            "id": str(r["id"]),
+            "id": r["id"],
             "project_name": r["project_name"],
             "current_stage": r["current_stage"],
             "current_section": r["current_section"],
-            "data": r["data"],
-            "created_at": r["created_at"].isoformat(),
-            "updated_at": r["updated_at"].isoformat(),
+            "data": json.loads(r["data"]) if isinstance(r["data"], str) else r["data"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
         }
     finally:
         conn.close()
@@ -273,36 +389,39 @@ async def update_session(session_id: str, body: SessionUpdate, user_id: str = De
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM sessions WHERE id=%s AND user_id=%s", (session_id, user_id))
+        cur.execute("SELECT id FROM sessions WHERE id=? AND user_id=?", (session_id, user_id))
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Session not found")
 
         updates, vals = [], []
         if body.project_name is not None:
-            updates.append("project_name=%s"); vals.append(body.project_name)
+            updates.append("project_name=?"); vals.append(body.project_name)
         if body.current_stage is not None:
-            updates.append("current_stage=%s"); vals.append(body.current_stage)
+            updates.append("current_stage=?"); vals.append(body.current_stage)
         if body.current_section is not None:
-            updates.append("current_section=%s"); vals.append(body.current_section)
+            updates.append("current_section=?"); vals.append(body.current_section)
         if body.data is not None:
-            updates.append("data=%s"); vals.append(json.dumps(body.data))
-        updates.append("updated_at=NOW()")
+            updates.append("data=?"); vals.append(json.dumps(body.data))
+        now = datetime.now(timezone.utc).isoformat()
+        updates.append("updated_at=?"); vals.append(now)
         vals.extend([session_id, user_id])
 
         cur.execute(
-            f"UPDATE sessions SET {', '.join(updates)} WHERE id=%s AND user_id=%s RETURNING *",
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id=? AND user_id=?",
             vals,
         )
-        r = cur.fetchone()
         conn.commit()
+
+        cur.execute("SELECT * FROM sessions WHERE id=?", (session_id,))
+        r = cur.fetchone()
         return {
-            "id": str(r["id"]),
+            "id": r["id"],
             "project_name": r["project_name"],
             "current_stage": r["current_stage"],
             "current_section": r["current_section"],
-            "data": r["data"],
-            "created_at": r["created_at"].isoformat(),
-            "updated_at": r["updated_at"].isoformat(),
+            "data": json.loads(r["data"]) if isinstance(r["data"], str) else r["data"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
         }
     finally:
         conn.close()
@@ -313,7 +432,7 @@ async def delete_session(session_id: str, user_id: str = Depends(get_current_use
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("DELETE FROM sessions WHERE id=%s AND user_id=%s", (session_id, user_id))
+        cur.execute("DELETE FROM sessions WHERE id=? AND user_id=?", (session_id, user_id))
         conn.commit()
         return {"status": "deleted"}
     finally:
@@ -595,6 +714,152 @@ async def ai_generate(body: AIRequest, user_id: str = Depends(get_current_user))
                 escaped = payload.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
                 yield f'data: {{"token":"{escaped}"}}\n\n'
         yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ── Chat endpoint (Dashboard) ─────────────────────────────────────────────────
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    provider: str = "auto"  # "auto" | "together" | "openrouter" | specific model string
+
+
+async def stream_chat(client: AsyncOpenAI, model: str, messages: list[dict]) -> AsyncIterator[str]:
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+        max_tokens=4096,
+        temperature=0.7,
+    )
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
+@api.post("/ai/chat")
+async def ai_chat(body: ChatRequest, user_id: str = Depends(get_current_user)):
+    provider = body.provider or "auto"
+    messages = [m.model_dump() for m in body.messages]
+
+    # Get per-user API keys from DB
+    user_tog_key, user_or_key = get_user_api_keys(user_id)
+
+    # Create clients with user's keys
+    tog_client = AsyncOpenAI(
+        api_key=user_tog_key or "placeholder",
+        base_url="https://api.together.xyz/v1",
+    )
+    or_client = AsyncOpenAI(
+        api_key=user_or_key or "placeholder",
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": "https://podcastone.workshop.build",
+            "X-Title": "Podcast One Script Wizard",
+        },
+    )
+
+    # System prompt for the chat assistant
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a podcast production assistant. You help users brainstorm, "
+            "research, and plan their podcast episodes. You can suggest topics, "
+            "help structure episodes, provide research insights, and answer "
+            "questions about podcasting best practices. Be conversational, "
+            "knowledgeable, and helpful."
+        ),
+    }
+    full_messages = [system_msg] + messages
+
+    async def event_stream():
+        if provider == "together":
+            model_name = TOGETHER_MODELS.get("draft", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+            if not user_tog_key:
+                yield f"data: {json.dumps({'error': 'Together.AI API key not configured. Add it in Settings.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            yield f"data: {json.dumps({'provider': 'Together.AI', 'model': model_name})}\n\n"
+            try:
+                async for token in stream_chat(tog_client, model_name, full_messages):
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                yield f"data: {json.dumps({'error': f'Together.AI error: {str(e)}'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+        elif provider == "openrouter":
+            model_name = OPENROUTER_MODELS.get("draft", "meta-llama/llama-3.3-70b-instruct:free")
+            if not user_or_key:
+                yield f"data: {json.dumps({'error': 'OpenRouter API key not configured. Add it in Settings.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            yield f"data: {json.dumps({'provider': 'OpenRouter', 'model': model_name})}\n\n"
+            try:
+                async for token in stream_chat(or_client, model_name, full_messages):
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                yield f"data: {json.dumps({'error': f'OpenRouter error: {str(e)}'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+        elif provider.startswith("model:"):
+            model_name = provider[6:]
+            if not user_tog_key and not user_or_key:
+                yield f"data: {json.dumps({'error': 'No API key configured. Add a key in Settings.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            client = tog_client if user_tog_key else or_client
+            pname = "Together.AI" if user_tog_key else "OpenRouter"
+            yield f"data: {json.dumps({'provider': pname, 'model': model_name})}\n\n"
+            try:
+                async for token in stream_chat(client, model_name, full_messages):
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                yield f"data: {json.dumps({'error': f'Error: {str(e)}'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+        else:
+            # "auto" — try Together.AI first, fall back to OpenRouter
+            if user_tog_key:
+                model_name = TOGETHER_MODELS.get("draft", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+                yield f"data: {json.dumps({'provider': 'Together.AI', 'model': model_name})}\n\n"
+                try:
+                    async for token in stream_chat(tog_client, model_name, full_messages):
+                        yield f"data: {json.dumps({'token': token})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                except Exception:
+                    pass  # fall through to OpenRouter
+
+            if user_or_key:
+                model_name = OPENROUTER_MODELS.get("draft", "meta-llama/llama-3.3-70b-instruct:free")
+                yield f"data: {json.dumps({'provider': 'OpenRouter', 'model': model_name})}\n\n"
+                try:
+                    async for token in stream_chat(or_client, model_name, full_messages):
+                        yield f"data: {json.dumps({'token': token})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                except Exception as e:
+                    yield f"data: {json.dumps({'error': f'OpenRouter error: {str(e)}'})}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+            yield f"data: {json.dumps({'error': 'No API keys configured. Add your Together.AI or OpenRouter key in Settings.'})}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

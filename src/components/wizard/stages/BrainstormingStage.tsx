@@ -104,7 +104,7 @@ export function BrainstormingStage() {
   useEffect(() => {
     if (podcastType && subTypes && !subTypes.includes(podcastSubType)) {
       setPodcastSubType("")
-      setField("podcastSubType", "")
+      setTimeout(() => setField("podcastSubType", ""), 0)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [podcastType])

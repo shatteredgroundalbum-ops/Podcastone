@@ -1,45 +1,57 @@
-import type { ApiStatus, HealthResponse } from "./types";
-import { Card, CardContent } from "@/components/ui/card";
-import { useEffect, useState } from "react";
+import { useState, useEffect, useCallback } from "react"
 
-function App() {
-  const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
+import { AuthProvider, useAuth } from "@/contexts/AuthContext"
+import { SessionProvider } from "@/contexts/SessionContext"
+import { SplashScreen } from "@/components/SplashScreen"
+import { AuthScreen } from "@/components/AuthScreen"
+import { HomeScreen } from "@/components/HomeScreen"
+import { Wizard } from "@/components/wizard/Wizard"
+
+type AppView = "splash" | "auth" | "home" | "wizard"
+
+function AppContent() {
+  const { user, isLoading } = useAuth()
+  const [view, setView] = useState<AppView>("splash")
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then((data: HealthResponse) => setApiStatus(data?.ok ? "connected" : "error"))
-      .catch(() => setApiStatus("error"));
-  }, []);
+    if (!isLoading && view === "splash") return // let splash finish
+    if (!isLoading) setView(user ? "home" : "auth")
+  }, [user, isLoading])
 
-  const dotColor =
-    apiStatus === "connected" ? "#22c55e" : apiStatus === "error" ? "#ef4444" : "#ccc";
-  const textColor =
-    apiStatus === "connected" ? "#16a34a" : apiStatus === "error" ? "#dc2626" : undefined;
-  const statusText =
-    apiStatus === "checking"
-      ? "Checking API\u2026"
-      : apiStatus === "connected"
-        ? "API connected"
-        : "API unreachable";
+  const handleStartWizard = useCallback(() => setView("wizard"), [])
+  const handleExitWizard = useCallback(() => setView("home"), [])
+  const handleSplashDone = useCallback(() => setView(user ? "home" : "auth"), [user])
 
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <Card>
-        <CardContent className="pt-6 text-center">
-          <h1 className="text-2xl font-bold text-foreground mb-2">Welcome to your React Web App</h1>
-          <p className="text-muted-foreground">Start building something amazing.</p>
-          <div className="mt-4 flex items-center justify-center gap-2 text-sm">
-            <span
-              className="inline-block h-2.5 w-2.5 rounded-full"
-              style={{ background: dotColor }}
-            />
-            <span style={{ color: textColor }}>{statusText}</span>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
+      </div>
+    )
+  }
+
+  switch (view) {
+    case "splash":
+      return <SplashScreen onGetStarted={handleSplashDone} />
+    case "auth":
+      return <AuthScreen onBack={() => {}} />
+    case "home":
+      return <HomeScreen onStartWizard={handleStartWizard} />
+    case "wizard":
+      return <Wizard onExit={handleExitWizard} />
+    default:
+      return <AuthScreen onBack={() => {}} />
+  }
 }
 
-export default App;
+function App() {
+  return (
+    <AuthProvider>
+      <SessionProvider>
+        <AppContent />
+      </SessionProvider>
+    </AuthProvider>
+  )
+}
+
+export default App
