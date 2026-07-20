@@ -10,6 +10,10 @@ dependencies = [
     "httpx==0.28.1",
     "python-multipart==0.0.22",
     "watchfiles==1.1.1",
+    "openai>=2.44.0",
+    "psycopg2-binary>=2.9.12",
+    "bcrypt>=5.0.0",
+    "pyjwt>=2.13.0",
 ]
 
 [tool.uv]

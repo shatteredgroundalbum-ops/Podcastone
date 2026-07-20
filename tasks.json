@@ -1,0 +1,32 @@
+[
+  {
+    "id": "1",
+    "content": "[setup] Install Python deps, DB schema, backend routes (auth + sessions + AI streaming)",
+    "status": "pending"
+  },
+  {
+    "id": "2",
+    "content": "[setup] Install Node deps, PWA manifest, vite.config, global types",
+    "status": "pending"
+  },
+  {
+    "id": "3",
+    "content": "[frontend] Auth context, session context, App.tsx routing, Splash/Auth/NewProject screens",
+    "status": "pending"
+  },
+  {
+    "id": "4",
+    "content": "[wizard] Stage 1 Identify form (all podcast types + True Crime intake) + Stage 2 Intake Review",
+    "status": "pending"
+  },
+  {
+    "id": "5",
+    "content": "[wizard] Stage 3 Research (streaming AI) + Stage 4 Research Review",
+    "status": "pending"
+  },
+  {
+    "id": "6",
+    "content": "[wizard] Stages 5-12: Drafts, Polish, Production Blocks, Final Review, Export",
+    "status": "pending"
+  }
+]
